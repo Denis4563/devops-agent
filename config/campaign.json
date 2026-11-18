@@ -1,0 +1,9 @@
+{
+  "campaign_id": "LIVE-2026W47",
+  "phase": "NORMAL",
+  "t0": "2026-11-25T20:00:00+08:00",
+  "duration_min": 120,
+  "hot_skus": ["HOT-001", "HOT-002"],
+  "coupon_drop_at": "2026-11-25T20:00:00+08:00",
+  "markets": ["SG", "EU"]
+}

@@ -1,0 +1,15 @@
+# Runbook 目录：ops-mcp 的参数白名单与 GitHub Workflow 的校验共用此文件
+runbooks:
+  scale:
+    description: 调整服务 HPA 的 minReplicas / maxReplicas
+    params:
+      svc: {type: enum, values: [catalog, coupon, checkout]}
+      min: {type: int, min: 1, max: 10}
+      max: {type: int, min: 2, max: 30}
+  cdn_fix:
+    description: 恢复 geo-rewrite 剥离追踪参数并对 /live/* 和 /eu/* 做 invalidation
+    params: {}
+  waf_guard:
+    description: 切换 coupon-claim-rate-guard 规则 Count/Block（仅 /api/coupon/claim）
+    params:
+      mode: {type: enum, values: ["on", "off"]}

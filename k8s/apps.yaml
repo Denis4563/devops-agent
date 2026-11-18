@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: retail
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  namespace: retail
+  labels: {app: catalog, Project: retail-live}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: catalog}}
+  template:
+    metadata:
+      labels: {app: catalog}
+    spec:
+      containers:
+        - name: catalog
+          image: public.ecr.aws/nginx/nginx:1.27
+          ports: [{containerPort: 80}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: catalog, namespace: retail}
+spec:
+  selector: {app: catalog}
+  ports: [{port: 80, targetPort: 80}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: catalog, namespace: retail}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: catalog}
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 65}}
+  behavior:
+    scaleUp: {stabilizationWindowSeconds: 0}
+    scaleDown: {stabilizationWindowSeconds: 300}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coupon
+  namespace: retail
+  labels: {app: coupon, Project: retail-live}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: coupon}}
+  template:
+    metadata:
+      labels: {app: coupon}
+    spec:
+      containers:
+        - name: coupon
+          image: public.ecr.aws/nginx/nginx:1.27
+          ports: [{containerPort: 80}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: coupon, namespace: retail}
+spec:
+  selector: {app: coupon}
+  ports: [{port: 80, targetPort: 80}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: coupon, namespace: retail}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: coupon}
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 60}}
+  behavior:
+    scaleUp: {stabilizationWindowSeconds: 0}
+    scaleDown: {stabilizationWindowSeconds: 300}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: retail
+  labels: {app: checkout, Project: retail-live}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: checkout}}
+  template:
+    metadata:
+      labels: {app: checkout}
+    spec:
+      containers:
+        - name: checkout
+          image: public.ecr.aws/nginx/nginx:1.27
+          ports: [{containerPort: 80}]
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: checkout, namespace: retail}
+spec:
+  selector: {app: checkout}
+  ports: [{port: 80, targetPort: 80}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: checkout, namespace: retail}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: checkout}
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 60}}
+  behavior:
+    scaleUp: {stabilizationWindowSeconds: 0}
+    scaleDown: {stabilizationWindowSeconds: 300}
+---
+# Agent 只读访问：创建 EKS Access Entry（在 A 的步骤中执行）
+# aws eks create-access-entry --cluster-name retail-live --principal-arn <AgentSpaceRoleArn>
+# aws eks associate-access-policy --cluster-name retail-live --principal-arn <AgentSpaceRoleArn> \
+#   --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonAIOpsAssistantPolicy \
+#   --access-scope type=namespace,namespaces=retail

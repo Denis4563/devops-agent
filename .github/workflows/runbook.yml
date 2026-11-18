@@ -1,0 +1,99 @@
+name: liveops-runbook
+on:
+  repository_dispatch:
+    types: [liveops-execute]
+  workflow_dispatch:
+    inputs:
+      jira_key: {required: true}
+      runbook: {required: true}
+      params: {required: true, default: "{}"}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: liveops-${{ github.event.client_payload.jira_key || inputs.jira_key }}
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    env:
+      JIRA_KEY: ${{ github.event.client_payload.jira_key || inputs.jira_key }}
+      RUNBOOK: ${{ github.event.client_payload.runbook || inputs.runbook }}
+      PARAMS: ${{ github.event.client_payload.params && toJSON(github.event.client_payload.params) || inputs.params }}
+      JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+      JIRA_AUTH: ${{ secrets.JIRA_USER }}:${{ secrets.JIRA_TOKEN }}
+      JIRA_FIELD_RUNBOOK: ${{ vars.JIRA_FIELD_RUNBOOK || 'customfield_10101' }}
+      JIRA_FIELD_PARAMS: ${{ vars.JIRA_FIELD_PARAMS || 'customfield_10102' }}
+      CF_FUNCTION_NAME: ${{ vars.CF_FUNCTION_NAME || 'geo-rewrite' }}
+      CF_DISTRIBUTION_ID: ${{ vars.CF_DISTRIBUTION_ID }}
+      WAF_ACL_NAME: ${{ vars.WAF_ACL_NAME || 'retail-live-acl' }}
+      WAF_ACL_ID: ${{ vars.WAF_ACL_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 校验 Jira 审批状态与参数
+        run: |
+          set -e
+          ISSUE=$(curl -sf -u "$JIRA_AUTH" "$JIRA_BASE_URL/rest/api/2/issue/$JIRA_KEY")
+          STATUS=$(echo "$ISSUE" | jq -r .fields.status.name)
+          J_RB=$(echo "$ISSUE" | jq -r --arg f "$JIRA_FIELD_RUNBOOK" '.fields[$f] | if type=="object" then .value else . end')
+          J_PA=$(echo "$ISSUE" | jq -cS --arg f "$JIRA_FIELD_PARAMS" '.fields[$f] | fromjson')
+          IN_PA=$(echo "$PARAMS" | jq -cS .)
+          echo "status=$STATUS runbook=$J_RB params=$J_PA"
+          [ "$STATUS" = "已批准" ] || { echo "::error::工单未批准"; exit 1; }
+          [ "$J_RB" = "$RUNBOOK" ] || { echo "::error::Runbook 与工单不一致"; exit 1; }
+          [ "$J_PA" = "$IN_PA" ] || { echo "::error::参数与工单不一致"; exit 1; }
+          python3 - <<'EOF'
+          import yaml, json, os, sys
+          cat = yaml.safe_load(open("config/runbooks.yaml"))["runbooks"]
+          rb, p = os.environ["RUNBOOK"], json.loads(os.environ["PARAMS"])
+          if rb not in cat: sys.exit("runbook 不在目录中")
+          if set(p) != set(cat[rb].get("params") or {}): sys.exit("参数集合不匹配")
+          EOF
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-1
+
+      - name: 准备 kubectl
+        if: env.RUNBOOK == 'scale'
+        run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER || 'retail-live' }}
+
+      - name: 执行 Runbook
+        id: run
+        run: |
+          set -o pipefail
+          case "$RUNBOOK" in
+            scale) bash runbooks/scale.sh $(echo "$PARAMS" | jq -r '.svc, .min, .max') ;;
+            cdn_fix) bash runbooks/cdn_fix.sh ;;
+            waf_guard) bash runbooks/waf_guard.sh $(echo "$PARAMS" | jq -r .mode) ;;
+          esac 2>&1 | tee out.log
+
+      - name: 回写 Jira 并通知飞书
+        if: always()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          RESULT: ${{ steps.run.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          LOG=$(tail -c 1500 out.log 2>/dev/null || echo "-")
+          BODY=$(jq -n --arg b "[GitHub Runbook] $RUNBOOK $PARAMS 结果：$RESULT\n$RUN_URL\n{noformat}$LOG{noformat}" '{body:$b}')
+          curl -s -u "$JIRA_AUTH" -H 'Content-Type: application/json' -X POST "$JIRA_BASE_URL/rest/api/2/issue/$JIRA_KEY/comment" -d "$BODY" >/dev/null
+          if [ "$RESULT" = "success" ]; then
+            TID=$(curl -s -u "$JIRA_AUTH" "$JIRA_BASE_URL/rest/api/2/issue/$JIRA_KEY/transitions" | jq -r '.transitions[] | select(.to.name=="已完成") | .id' | head -1)
+            [ -n "$TID" ] && curl -s -u "$JIRA_AUTH" -H 'Content-Type: application/json' -X POST "$JIRA_BASE_URL/rest/api/2/issue/$JIRA_KEY/transitions" -d "{\"transition\":{\"id\":\"$TID\"}}"
+          fi
+          TS=$(date +%s)
+          SIGN=$(printf '' | openssl dgst -sha256 -hmac "$(printf '%s\n%s' "$TS" "$FEISHU_SECRET")" -binary | base64)
+          COLOR=$([ "$RESULT" = "success" ] && echo green || echo red)
+          jq -n --arg ts "$TS" --arg s "$SIGN" --arg t "Runbook 执行 $RESULT｜$JIRA_KEY" --arg c "**Runbook**：$RUNBOOK\n**参数**：$PARAMS" \
+             --arg u "$JIRA_BASE_URL/browse/$JIRA_KEY" --arg r "$RUN_URL" --arg col "$COLOR" \
+             '{timestamp:$ts,sign:$s,msg_type:"interactive",card:{header:{title:{tag:"plain_text",content:$t},template:$col},
+               elements:[{tag:"div",text:{tag:"lark_md",content:$c}},
+               {tag:"action",actions:[{tag:"button",type:"primary",text:{tag:"plain_text",content:"Jira 工单"},url:$u},
+                                      {tag:"button",text:{tag:"plain_text",content:"运行记录"},url:$r}]}]}}' \
+             | curl -s -H 'Content-Type: application/json' -X POST "$FEISHU_WEBHOOK" -d @-
